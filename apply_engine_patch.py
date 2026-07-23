@@ -4,10 +4,10 @@ import sys
 
 PATCH_ID = "PikaJieQi-7580820-RootGuard-LinuxLab-V1"
 
-UCI_MARKER = '  o["MultiPV"] << Option(1, 1, 500);\n'
-UCI_INSERT = '''  o["MultiPV"] << Option(1, 1, 500);\n\n  // Engine-native root tactical verifier.\n  o["Root Blunder Guard"] << Option(true);\n  o["Root Guard Candidates"] << Option(4, 2, 8);\n  o["Root Guard Hard Loss"] << Option(500, 100, 2000);\n  o["Root Guard Min Improvement"] << Option(180, 0, 1500);\n  o["Root Guard Max Score Drop"] << Option(150, 0, 1000);\n'''
+UCI_MARKER = '  o["MultiPV"]               << Option(1, 1, 500);\n'
+UCI_INSERT = '''  o["MultiPV"]               << Option(1, 1, 500);\n\n  // Engine-native root tactical verifier.\n  o["Root Blunder Guard"]    << Option(true);\n  o["Root Guard Candidates"] << Option(4, 2, 8);\n  o["Root Guard Hard Loss"]  << Option(500, 100, 2000);\n  o["Root Guard Min Improvement"] << Option(180, 0, 1500);\n  o["Root Guard Max Score Drop"]  << Option(150, 0, 1000);\n'''
 
-NAMESPACE_MARKER = '} // namespace\n\n/// Search::init() is called at startup to initialize various lookup tables\n'
+NAMESPACE_MARKER = '} // namespace\n\n\n/// Search::init() is called at startup to initialize various lookup tables\n'
 HELPER = r'''
 
 struct RootGuardRisk {
@@ -137,7 +137,7 @@ def main() -> int:
     uci_text = uci.read_text(encoding="utf-8")
     uci_text = replace_once(uci_text, UCI_MARKER, UCI_INSERT, "uci options")
     search_text = replace_once(search_text, NAMESPACE_MARKER,
-        f"// {PATCH_ID}\n" + HELPER + "\n} // namespace\n\n/// Search::init() is called at startup to initialize various lookup tables\n",
+        f"// {PATCH_ID}\n" + HELPER + "\n} // namespace\n\n\n/// Search::init() is called at startup to initialize various lookup tables\n",
         "helper insertion")
     search_text = replace_once(search_text, MULTIPV_OLD, MULTIPV_NEW, "multipv expansion")
     search_text = replace_once(search_text, FINAL_OLD, FINAL_NEW, "final root verification")
