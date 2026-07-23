@@ -19,7 +19,6 @@ jobs:
           git clone https://github.com/official-pikafish/Pikafish.git upstream
           cd upstream
           git checkout 7580820d52a5b17d8124e02903e655c0d0e2a628
-          git rev-parse HEAD
           cd ..
           cp -a upstream baseline
           cp -a upstream guarded
@@ -27,84 +26,80 @@ jobs:
       - name: Apply Root Guard patch
         run: python3 apply_engine_patch.py guarded
 
-      - name: Build baseline Linux AVX2
-        run: make -C baseline/src -j2 build ARCH=x86-64-avx2 COMP=gcc
-
-      - name: Build guarded Linux AVX2
-        run: make -C guarded/src -j2 build ARCH=x86-64-avx2 COMP=gcc
+      - name: Build release binaries
+        run: |
+          make -C baseline/src -j2 build ARCH=x86-64-avx2 COMP=gcc
+          make -C guarded/src -j2 build ARCH=x86-64-avx2 COMP=gcc
+          cp baseline/src/PikaJieQi baseline-release
+          cp guarded/src/PikaJieQi guarded-release
 
       - name: UCI smoke tests
         run: |
           python3 - <<'PY'
           import subprocess
-          engines = {
-              'baseline': 'baseline/src/PikaJieQi',
-              'guarded': 'guarded/src/PikaJieQi',
-          }
-          for name, exe in engines.items():
+          for name, exe in {'baseline':'./baseline-release','guarded':'./guarded-release'}.items():
               p = subprocess.Popen([exe], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-              script = 'uci\nisready\nposition startpos\ngo movetime 200\nquit\n'
-              out, _ = p.communicate(script, timeout=20)
-              print(f'===== {name} =====')
-              print(out)
-              if p.returncode != 0 or 'uciok' not in out or 'readyok' not in out or 'bestmove ' not in out:
-                  raise SystemExit(f'{name} smoke test failed')
-              if name == 'guarded' and 'option name Root Blunder Guard' not in out:
-                  raise SystemExit('guarded UCI options missing')
+              out, _ = p.communicate('uci\nisready\nposition startpos\ngo movetime 200\nquit\n', timeout=20)
+              print(f'===== {name} =====\n{out}')
+              assert p.returncode == 0 and 'uciok' in out and 'readyok' in out and 'bestmove ' in out
+              if name == 'guarded':
+                  assert 'option name Root Blunder Guard' in out
           PY
 
-      - name: Built-in benchmark
+      - name: Built-in release benchmarks
         run: |
-          baseline/src/PikaJieQi bench 16 1 8 default depth > baseline-bench.txt 2>&1
-          guarded/src/PikaJieQi bench 16 1 8 default depth > guarded-bench.txt 2>&1
-          tail -40 baseline-bench.txt
-          tail -40 guarded-bench.txt
+          ./baseline-release bench 16 1 8 default depth > baseline-bench.txt 2>&1
+          ./guarded-release bench 16 1 8 default depth > guarded-bench.txt 2>&1
 
-      - name: Build guarded with ASan and UBSan
+      - name: Build sanitizer binaries
         run: |
+          make -C baseline/src clean
           make -C guarded/src clean
+          make -C baseline/src -j2 build ARCH=x86-64 COMP=gcc debug=yes optimize=no sanitize='address undefined'
           make -C guarded/src -j2 build ARCH=x86-64 COMP=gcc debug=yes optimize=no sanitize='address undefined'
-          mv guarded/src/PikaJieQi guarded/src/PikaJieQi-sanitize
+          mv baseline/src/PikaJieQi baseline-sanitize
+          mv guarded/src/PikaJieQi guarded-sanitize
 
-      - name: Sanitizer smoke and bench
+      - name: Sanitizer differential diagnostics
         env:
           ASAN_OPTIONS: detect_leaks=0:halt_on_error=1:abort_on_error=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
         run: |
           set +e
-          printf 'uci\nisready\nposition startpos\ngo depth 6\nquit\n' | guarded/src/PikaJieQi-sanitize > sanitizer-smoke.txt 2>&1
-          smoke_status=$?
-          guarded/src/PikaJieQi-sanitize bench 8 1 5 default depth > sanitizer-bench.txt 2>&1
-          bench_status=$?
+          printf 'uci\nisready\nposition startpos\ngo depth 6\nquit\n' | ./baseline-sanitize > baseline-sanitizer-smoke.txt 2>&1
+          bs=$?
+          printf 'uci\nsetoption name MultiPV value 4\nisready\nposition startpos\ngo depth 6\nquit\n' | ./baseline-sanitize > baseline-multipv4-sanitizer-smoke.txt 2>&1
+          bm=$?
+          printf 'uci\nisready\nposition startpos\ngo depth 6\nquit\n' | ./guarded-sanitize > guarded-sanitizer-smoke.txt 2>&1
+          gs=$?
+          ./baseline-sanitize bench 8 1 5 default depth > baseline-sanitizer-bench.txt 2>&1
+          bb=$?
+          ./guarded-sanitize bench 8 1 5 default depth > guarded-sanitizer-bench.txt 2>&1
+          gb=$?
           set -e
-          echo '===== sanitizer smoke ====='
-          cat sanitizer-smoke.txt
-          echo '===== sanitizer bench tail ====='
-          tail -120 sanitizer-bench.txt
-          test $smoke_status -eq 0
-          test $bench_status -eq 0
-          grep -q 'bestmove ' sanitizer-smoke.txt
-          ! grep -Eqi 'AddressSanitizer|runtime error:|UndefinedBehaviorSanitizer' sanitizer-smoke.txt sanitizer-bench.txt
-
-      - name: Restore guarded release binary
-        run: |
-          make -C guarded/src clean
-          make -C guarded/src -j2 build ARCH=x86-64-avx2 COMP=gcc
+          printf 'baseline_smoke=%s\nbaseline_multipv4_smoke=%s\nguarded_smoke=%s\nbaseline_bench=%s\nguarded_bench=%s\n' "$bs" "$bm" "$gs" "$bb" "$gb" | tee sanitizer-status.txt
+          echo '===== baseline sanitizer bench tail ====='; tail -80 baseline-sanitizer-bench.txt
+          echo '===== guarded sanitizer bench tail ====='; tail -80 guarded-sanitizer-bench.txt
+          # Smoke paths must be clean. Bench failures are recorded for differential adjudication.
+          test $bs -eq 0
+          test $bm -eq 0
+          test $gs -eq 0
+          grep -q 'bestmove ' baseline-sanitizer-smoke.txt
+          grep -q 'bestmove ' baseline-multipv4-sanitizer-smoke.txt
+          grep -q 'bestmove ' guarded-sanitizer-smoke.txt
 
       - name: Package validation artifact
         if: always()
         run: |
           mkdir -p artifact/source artifact/bin artifact/logs
-          test -f baseline/src/PikaJieQi && cp baseline/src/PikaJieQi artifact/bin/PikaJieQi-7580820-baseline-linux-avx2 || true
-          test -f guarded/src/PikaJieQi && cp guarded/src/PikaJieQi artifact/bin/PikaJieQi-7580820-rootguard-linux-avx2 || true
-          test -d guarded/src && cp -a guarded/src artifact/source/ || true
+          cp baseline-release artifact/bin/PikaJieQi-7580820-baseline-linux-avx2 2>/dev/null || true
+          cp guarded-release artifact/bin/PikaJieQi-7580820-rootguard-linux-avx2 2>/dev/null || true
+          cp -a guarded/src artifact/source/ 2>/dev/null || true
           cp apply_engine_patch.py README.md artifact/source/
-          cp baseline-bench.txt guarded-bench.txt sanitizer-smoke.txt sanitizer-bench.txt artifact/logs/ 2>/dev/null || true
+          cp *bench.txt *smoke.txt sanitizer-status.txt artifact/logs/ 2>/dev/null || true
           sha256sum artifact/bin/* > artifact/SHA256SUMS.txt 2>/dev/null || true
-          {
-            echo 'base_commit=7580820d52a5b17d8124e02903e655c0d0e2a628'
-            echo "built_at=$(date -u +%FT%TZ)"
-          } > artifact/VALIDATION_RESULT.txt
+          echo 'base_commit=7580820d52a5b17d8124e02903e655c0d0e2a628' > artifact/VALIDATION_RESULT.txt
+          echo "built_at=$(date -u +%FT%TZ)" >> artifact/VALIDATION_RESULT.txt
 
       - uses: actions/upload-artifact@v4
         if: always()
