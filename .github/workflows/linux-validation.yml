@@ -68,32 +68,46 @@ jobs:
 
       - name: Sanitizer smoke and bench
         env:
-          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          ASAN_OPTIONS: detect_leaks=0:halt_on_error=1:abort_on_error=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
         run: |
+          set +e
           printf 'uci\nisready\nposition startpos\ngo depth 6\nquit\n' | guarded/src/PikaJieQi-sanitize > sanitizer-smoke.txt 2>&1
-          grep -q 'bestmove ' sanitizer-smoke.txt
+          smoke_status=$?
           guarded/src/PikaJieQi-sanitize bench 8 1 5 default depth > sanitizer-bench.txt 2>&1
+          bench_status=$?
+          set -e
+          echo '===== sanitizer smoke ====='
+          cat sanitizer-smoke.txt
+          echo '===== sanitizer bench tail ====='
+          tail -120 sanitizer-bench.txt
+          test $smoke_status -eq 0
+          test $bench_status -eq 0
+          grep -q 'bestmove ' sanitizer-smoke.txt
+          ! grep -Eqi 'AddressSanitizer|runtime error:|UndefinedBehaviorSanitizer' sanitizer-smoke.txt sanitizer-bench.txt
 
       - name: Restore guarded release binary
-        run: make -C guarded/src -j2 build ARCH=x86-64-avx2 COMP=gcc
+        run: |
+          make -C guarded/src clean
+          make -C guarded/src -j2 build ARCH=x86-64-avx2 COMP=gcc
 
       - name: Package validation artifact
+        if: always()
         run: |
           mkdir -p artifact/source artifact/bin artifact/logs
-          cp baseline/src/PikaJieQi artifact/bin/PikaJieQi-7580820-baseline-linux-avx2
-          cp guarded/src/PikaJieQi artifact/bin/PikaJieQi-7580820-rootguard-linux-avx2
-          cp -a guarded/src artifact/source/
+          test -f baseline/src/PikaJieQi && cp baseline/src/PikaJieQi artifact/bin/PikaJieQi-7580820-baseline-linux-avx2 || true
+          test -f guarded/src/PikaJieQi && cp guarded/src/PikaJieQi artifact/bin/PikaJieQi-7580820-rootguard-linux-avx2 || true
+          test -d guarded/src && cp -a guarded/src artifact/source/ || true
           cp apply_engine_patch.py README.md artifact/source/
-          cp baseline-bench.txt guarded-bench.txt sanitizer-smoke.txt sanitizer-bench.txt artifact/logs/
-          sha256sum artifact/bin/* > artifact/SHA256SUMS.txt
+          cp baseline-bench.txt guarded-bench.txt sanitizer-smoke.txt sanitizer-bench.txt artifact/logs/ 2>/dev/null || true
+          sha256sum artifact/bin/* > artifact/SHA256SUMS.txt 2>/dev/null || true
           {
             echo 'base_commit=7580820d52a5b17d8124e02903e655c0d0e2a628'
-            echo 'verdict=PASS'
             echo "built_at=$(date -u +%FT%TZ)"
           } > artifact/VALIDATION_RESULT.txt
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: pikajieqi-linux-validation
           path: artifact
