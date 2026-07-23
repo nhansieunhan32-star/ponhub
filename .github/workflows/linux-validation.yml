@@ -3,6 +3,8 @@ name: PikaJieQi Linux Validation
 on:
   push:
     branches: [ main ]
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
@@ -34,7 +36,7 @@ jobs:
       - name: UCI smoke tests
         run: |
           python3 - <<'PY'
-          import subprocess, sys
+          import subprocess
           engines = {
               'baseline': 'baseline/src/PikaJieQi',
               'guarded': 'guarded/src/PikaJieQi',
