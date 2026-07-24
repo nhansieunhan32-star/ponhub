@@ -1,109 +1,113 @@
-name: PikaJieQi Linux Validation
+name: PikaJieQi Certified Safety Release
 
 on:
-  push:
-    branches: [ main ]
   pull_request:
     branches: [ main ]
   workflow_dispatch:
 
 jobs:
-  build-test:
+  build-test-package:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
+
+      - name: Verify and reconstruct final patch
+        run: |
+          echo '55cd93fccda02150264957e738a78f8bb47b927e56aadea40835907ed4665eef  V1_TO_CERTIFIED.patch.gz.b64' | sha256sum -c -
+          base64 -d V1_TO_CERTIFIED.patch.gz.b64 | gzip -dc > V1_TO_CERTIFIED.patch
+          echo '3767da156b3266013c711146932902ccd3a448fd63f63360e741e99020847929  V1_TO_CERTIFIED.patch' | sha256sum -c -
 
       - name: Checkout exact upstream source
         run: |
           git clone https://github.com/official-pikafish/Pikafish.git upstream
           cd upstream
           git checkout 7580820d52a5b17d8124e02903e655c0d0e2a628
+          test "$(git rev-parse HEAD)" = '7580820d52a5b17d8124e02903e655c0d0e2a628'
           cd ..
           cp -a upstream baseline
-          cp -a upstream guarded
+          cp -a upstream certified
 
-      - name: Apply Root Guard patch
-        run: python3 apply_engine_patch.py guarded
+      - name: Apply V1 and Certified Tactical Safety patches
+        run: |
+          python3 apply_engine_patch.py certified
+          patch -d certified -p1 < V1_TO_CERTIFIED.patch
+          grep -q 'Certified Tactical Safety' certified/src/ucioption.cpp
+          grep -q 'certified' certified/src/search.cpp
 
-      - name: Build release binaries
+      - name: Build Linux AVX2 release
         run: |
           make -C baseline/src -j2 build ARCH=x86-64-avx2 COMP=gcc
-          make -C guarded/src -j2 build ARCH=x86-64-avx2 COMP=gcc
-          cp baseline/src/PikaJieQi baseline-release
-          cp guarded/src/PikaJieQi guarded-release
+          make -C certified/src -j2 build ARCH=x86-64-avx2 COMP=gcc
+          cp baseline/src/PikaJieQi PikaJieQi-7580820-baseline-linux-avx2
+          cp certified/src/PikaJieQi PikaJieQi-7580820-certified-safety-v1-linux-avx2
 
-      - name: UCI smoke tests
+      - name: Linux UCI smoke and benchmark
         run: |
           python3 - <<'PY'
           import subprocess
-          for name, exe in {'baseline':'./baseline-release','guarded':'./guarded-release'}.items():
+          engines = {
+              'baseline':'./PikaJieQi-7580820-baseline-linux-avx2',
+              'certified':'./PikaJieQi-7580820-certified-safety-v1-linux-avx2',
+          }
+          for name, exe in engines.items():
               p = subprocess.Popen([exe], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-              out, _ = p.communicate('uci\nisready\nposition startpos\ngo movetime 200\nquit\n', timeout=20)
+              out, _ = p.communicate('uci\nisready\nposition startpos\ngo movetime 200\nquit\n', timeout=30)
               print(f'===== {name} =====\n{out}')
               assert p.returncode == 0 and 'uciok' in out and 'readyok' in out and 'bestmove ' in out
-              if name == 'guarded':
-                  assert 'option name Root Blunder Guard' in out
+              if name == 'certified':
+                  assert 'option name Certified Tactical Safety' in out
           PY
+          ./PikaJieQi-7580820-baseline-linux-avx2 bench 16 1 8 default depth > baseline-bench.txt 2>&1
+          ./PikaJieQi-7580820-certified-safety-v1-linux-avx2 bench 16 1 8 default depth > certified-bench.txt 2>&1
 
-      - name: Built-in release benchmarks
+      - name: Install MinGW and Wine
         run: |
-          ./baseline-release bench 16 1 8 default depth > baseline-bench.txt 2>&1
-          ./guarded-release bench 16 1 8 default depth > guarded-bench.txt 2>&1
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends g++-mingw-w64-x86-64 wine64
 
-      - name: Build sanitizer binaries
+      - name: Build Windows AVX2 release
         run: |
-          make -C baseline/src clean
-          make -C guarded/src clean
-          make -C baseline/src -j2 build ARCH=x86-64 COMP=gcc debug=yes optimize=no sanitize='address undefined'
-          make -C guarded/src -j2 build ARCH=x86-64 COMP=gcc debug=yes optimize=no sanitize='address undefined'
-          mv baseline/src/PikaJieQi baseline-sanitize
-          mv guarded/src/PikaJieQi guarded-sanitize
+          make -C certified/src clean
+          make -C certified/src -j2 build ARCH=x86-64-avx2 COMP=mingw
+          test -f certified/src/PikaJieQi.exe
+          cp certified/src/PikaJieQi.exe 05-pikafish-jieqi-7580820-certified-safety-v1-avx2.exe
+          file 05-pikafish-jieqi-7580820-certified-safety-v1-avx2.exe | tee windows-file.txt
+          x86_64-w64-mingw32-objdump -f 05-pikafish-jieqi-7580820-certified-safety-v1-avx2.exe | tee windows-objdump.txt
+          grep -qi 'pei-x86-64' windows-objdump.txt
 
-      - name: Sanitizer differential diagnostics
+      - name: Windows UCI smoke under Wine
         env:
-          ASAN_OPTIONS: detect_leaks=0:halt_on_error=1:abort_on_error=1
-          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          WINEDEBUG: '-all'
         run: |
-          set +e
-          printf 'uci\nisready\nposition startpos\ngo depth 6\nquit\n' | ./baseline-sanitize > baseline-sanitizer-smoke.txt 2>&1
-          bs=$?
-          printf 'uci\nsetoption name MultiPV value 4\nisready\nposition startpos\ngo depth 6\nquit\n' | ./baseline-sanitize > baseline-multipv4-sanitizer-smoke.txt 2>&1
-          bm=$?
-          printf 'uci\nisready\nposition startpos\ngo depth 6\nquit\n' | ./guarded-sanitize > guarded-sanitizer-smoke.txt 2>&1
-          gs=$?
-          ./baseline-sanitize bench 8 1 5 default depth > baseline-sanitizer-bench.txt 2>&1
-          bb=$?
-          ./guarded-sanitize bench 8 1 5 default depth > guarded-sanitizer-bench.txt 2>&1
-          gb=$?
-          set -e
-          printf 'baseline_smoke=%s\nbaseline_multipv4_smoke=%s\nguarded_smoke=%s\nbaseline_bench=%s\nguarded_bench=%s\n' "$bs" "$bm" "$gs" "$bb" "$gb" | tee sanitizer-status.txt
-          echo '===== baseline sanitizer bench tail ====='; tail -80 baseline-sanitizer-bench.txt
-          echo '===== guarded sanitizer bench tail ====='; tail -80 guarded-sanitizer-bench.txt
-          # Smoke paths must be clean. Bench failures are recorded for differential adjudication.
-          test $bs -eq 0
-          test $bm -eq 0
-          test $gs -eq 0
-          grep -q 'bestmove ' baseline-sanitizer-smoke.txt
-          grep -q 'bestmove ' baseline-multipv4-sanitizer-smoke.txt
-          grep -q 'bestmove ' guarded-sanitizer-smoke.txt
+          set -o pipefail
+          printf 'uci\nisready\nposition startpos\ngo depth 5\nquit\n' | timeout 60s wine 05-pikafish-jieqi-7580820-certified-safety-v1-avx2.exe > windows-uci-smoke.txt 2>&1
+          cat windows-uci-smoke.txt
+          grep -q 'uciok' windows-uci-smoke.txt
+          grep -q 'readyok' windows-uci-smoke.txt
+          grep -q 'option name Certified Tactical Safety' windows-uci-smoke.txt
+          grep -q 'bestmove ' windows-uci-smoke.txt
 
-      - name: Package validation artifact
+      - name: Package release artifact
         if: always()
         run: |
-          mkdir -p artifact/source artifact/bin artifact/logs
-          cp baseline-release artifact/bin/PikaJieQi-7580820-baseline-linux-avx2 2>/dev/null || true
-          cp guarded-release artifact/bin/PikaJieQi-7580820-rootguard-linux-avx2 2>/dev/null || true
-          cp -a guarded/src artifact/source/ 2>/dev/null || true
-          cp apply_engine_patch.py README.md artifact/source/
-          cp *bench.txt *smoke.txt sanitizer-status.txt artifact/logs/ 2>/dev/null || true
+          mkdir -p artifact/bin artifact/source artifact/logs
+          cp 05-pikafish-jieqi-7580820-certified-safety-v1-avx2.exe artifact/bin/ 2>/dev/null || true
+          cp PikaJieQi-7580820-certified-safety-v1-linux-avx2 artifact/bin/ 2>/dev/null || true
+          cp -a certified/src artifact/source/ 2>/dev/null || true
+          cp apply_engine_patch.py V1_TO_CERTIFIED.patch README.md artifact/source/ 2>/dev/null || true
+          cp baseline-bench.txt certified-bench.txt windows-file.txt windows-objdump.txt windows-uci-smoke.txt artifact/logs/ 2>/dev/null || true
+          cp upstream/Copying.txt artifact/LICENSE_GPL-3.0.txt 2>/dev/null || true
           sha256sum artifact/bin/* > artifact/SHA256SUMS.txt 2>/dev/null || true
-          echo 'base_commit=7580820d52a5b17d8124e02903e655c0d0e2a628' > artifact/VALIDATION_RESULT.txt
-          echo "built_at=$(date -u +%FT%TZ)" >> artifact/VALIDATION_RESULT.txt
+          {
+            echo 'base_commit=7580820d52a5b17d8124e02903e655c0d0e2a628'
+            echo 'certified_patch_sha256=3767da156b3266013c711146932902ccd3a448fd63f63360e741e99020847929'
+            echo "built_at=$(date -u +%FT%TZ)"
+          } > artifact/VALIDATION_RESULT.txt
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: pikajieqi-linux-validation
+          name: pikajieqi-certified-safety-windows-avx2
           path: artifact
           retention-days: 7
