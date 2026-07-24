@@ -77,12 +77,17 @@ jobs:
           x86_64-w64-mingw32-objdump -f 05-pikafish-jieqi-7580820-certified-safety-v1-avx2.exe | tee windows-objdump.txt
           grep -qi 'pei-x86-64' windows-objdump.txt
 
-      - name: Windows UCI smoke under Wine
+      - name: Windows UCI smoke under Wine64
         env:
           WINEDEBUG: '-all'
         run: |
           set -o pipefail
-          printf 'uci\nisready\nposition startpos\ngo depth 5\nquit\n' | timeout 60s wine 05-pikafish-jieqi-7580820-certified-safety-v1-avx2.exe > windows-uci-smoke.txt 2>&1
+          WINEBIN="$(command -v wine || command -v wine64 || true)"
+          if [ -z "$WINEBIN" ] && [ -x /usr/lib/wine/wine64 ]; then WINEBIN=/usr/lib/wine/wine64; fi
+          echo "wine_binary=$WINEBIN" | tee windows-wine-path.txt
+          test -n "$WINEBIN"
+          test -x "$WINEBIN"
+          printf 'uci\nisready\nposition startpos\ngo depth 5\nquit\n' | timeout 60s "$WINEBIN" 05-pikafish-jieqi-7580820-certified-safety-v1-avx2.exe > windows-uci-smoke.txt 2>&1
           cat windows-uci-smoke.txt
           grep -q 'uciok' windows-uci-smoke.txt
           grep -q 'readyok' windows-uci-smoke.txt
@@ -97,7 +102,7 @@ jobs:
           cp PikaJieQi-7580820-certified-safety-v1-linux-avx2 artifact/bin/ 2>/dev/null || true
           cp -a certified/src artifact/source/ 2>/dev/null || true
           cp apply_engine_patch.py V1_TO_CERTIFIED.patch README.md artifact/source/ 2>/dev/null || true
-          cp baseline-bench.txt certified-bench.txt windows-file.txt windows-objdump.txt windows-uci-smoke.txt artifact/logs/ 2>/dev/null || true
+          cp baseline-bench.txt certified-bench.txt windows-file.txt windows-objdump.txt windows-uci-smoke.txt windows-wine-path.txt artifact/logs/ 2>/dev/null || true
           cp upstream/Copying.txt artifact/LICENSE_GPL-3.0.txt 2>/dev/null || true
           sha256sum artifact/bin/* > artifact/SHA256SUMS.txt 2>/dev/null || true
           {
