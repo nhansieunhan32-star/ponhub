@@ -14,6 +14,7 @@ jobs:
 
       - name: Verify and reconstruct final patch
         run: |
+          cat exact_parts/part00 exact_parts/part01 exact_parts/part02 exact_parts/part03 exact_parts/part04 exact_parts/part05 exact_parts/part06 exact_parts/part07 > V1_TO_CERTIFIED.patch.gz.b64
           echo '55cd93fccda02150264957e738a78f8bb47b927e56aadea40835907ed4665eef  V1_TO_CERTIFIED.patch.gz.b64' | sha256sum -c -
           base64 -d V1_TO_CERTIFIED.patch.gz.b64 | gzip -dc > V1_TO_CERTIFIED.patch
           echo '3767da156b3266013c711146932902ccd3a448fd63f63360e741e99020847929  V1_TO_CERTIFIED.patch' | sha256sum -c -
